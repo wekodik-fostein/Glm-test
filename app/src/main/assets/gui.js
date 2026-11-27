@@ -259,8 +259,8 @@
     'position:absolute;top:12px;left:44px;height:28px;display:flex;align-items:center;' +
     'color:rgba(255,255,255,.82);font:500 12px/1 Inter,"Segoe UI",system-ui,sans-serif;' +
     'letter-spacing:.01em;text-decoration:none;white-space:nowrap;cursor:pointer;' +
-    'text-shadow:0 1px 2px rgba(0,0,0,.6),0 -1px 0 rgba(255,255,255,.14);', panel, 't.me/scriptpump');
-  link.href = 'https://t.me/scriptpump';
+    'text-shadow:0 1px 2px rgba(0,0,0,.6),0 -1px 0 rgba(255,255,255,.14);', panel, 'github.com/wekodik-fostein');
+  link.href = 'https://github.com/wekodik-fostein';
   link.target = '_blank';
   link.rel = 'noopener noreferrer';
 
