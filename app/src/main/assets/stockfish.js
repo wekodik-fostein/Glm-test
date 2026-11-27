@@ -214,6 +214,11 @@ function genPawn(pos, sq, moves, capOnly) {
       }
     }
   }
+  // в квиесценсе берём и тихое превращение в ферзя
+  if (capOnly) {
+    const to = sq + fwd;
+    if (ON[to] && b[to] === null && to >= lo && to <= hi) moves.push(pack(sq, to, QUEEN, 0));
+  }
   for (const off of (turn === WHITE ? [-11, -9] : [11, 9])) {
     const to = sq + off;
     if (!ON[to]) continue;
@@ -377,7 +382,7 @@ function unmakeMove(pos, m) {
 }
 
 // ---------- Оценка ----------
-function evaluate(pos) {
+function evaluatePST(pos) {
   const b = pos.board;
   let phase = 0;
   for (let s = 21; s <= 98; s++) {
@@ -405,6 +410,136 @@ function evaluate(pos) {
     }
   }
   return pos.turn === WHITE ? score : -score;
+}
+
+// ---------- Служебное: повторения, ничья по материалу, null-move ----------
+// hist[j] хранит состояние ДО хода j. Повтор: та же позиция с той же стороной
+// (шаг 2) внутри окна с последнего необратимого хода.
+function isRepeat(pos) {
+  const n = pos.hist.length;
+  const lim = Math.max(0, n - pos.halfmove);
+  for (let j = n - 2; j >= lim; j -= 2) {
+    const h = pos.hist[j];
+    if (h[4] === pos.zh && h[5] === pos.zl) return true;
+  }
+  return false;
+}
+
+// Мата не будет: голые короли или один лёгкий минор против голого короля
+function insufficient(pos) {
+  let minors = 0;
+  const b = pos.board;
+  for (let s = 21; s <= 98; s++) {
+    if (!ON[s]) continue;
+    const p = b[s];
+    if (p === null) continue;
+    const pt = Math.abs(p);
+    if (pt === PAWN || pt === ROOK || pt === QUEEN) return false;
+    if (pt === KNIGHT || pt === BISHOP) minors++;
+  }
+  return minors <= 1;
+}
+
+// Есть ли у стороны, которой ходить, фигуры кроме пешек и короля (защита от цугцванга)
+function hasNonPawn(pos) {
+  const side = pos.turn;
+  for (let s = 21; s <= 98; s++) {
+    if (!ON[s]) continue;
+    const p = pos.board[s];
+    if (p === null || (p > 0) !== (side > 0)) continue;
+    const pt = Math.abs(p);
+    if (pt !== PAWN && pt !== KING) return true;
+  }
+  return false;
+}
+
+function makeNull(pos) {
+  pos.hist.push([pos.castling, pos.ep, pos.halfmove, null, pos.zh, pos.zl]);
+  if (pos.ep !== null) zep(pos, pos.ep);
+  pos.ep = null;
+  pos.halfmove++;
+  pos.turn = -pos.turn;
+  zt(pos);
+}
+
+function unmakeNull(pos) {
+  const [castle, ep, hm, , zh, zl] = pos.hist.pop();
+  pos.castling = castle; pos.ep = ep; pos.halfmove = hm;
+  pos.zh = zh; pos.zl = zl;
+  pos.turn = -pos.turn;
+}
+
+// ---------- Оценка: PST + пешки + пара слонов + ладьи на линиях + щит короля + темп ----------
+// Мобильность сознательно не считаем: генерация ходов в листьях слишком дорогая.
+const PASS_BONUS = [0, 6, 12, 22, 38, 65, 110];   // по продвижению пешки от стартовой
+const TEMPO = 10;
+
+// Штраф за дырявый щит короля (возвращает <= 0 для владельца щита)
+function shieldScore(b, ks, myPawn, dir) {
+  const rk = Math.floor(ks / 10) - 2, ck = ks % 10 - 1;
+  if (dir < 0 ? rk < 6 : rk > 1) return 0;   // король не на домашней горизонтали
+  const rr = rk + dir;
+  let need = 0, have = 0;
+  for (let dc = -1; dc <= 1; dc++) {
+    const cc = ck + dc;
+    if (cc < 0 || cc > 7) continue;
+    need++;
+    if (b[(rr + 2) * 10 + cc + 1] === myPawn) have++;
+  }
+  return -12 * (need - have);
+}
+
+function evaluate(pos) {
+  const b = pos.board;
+  const wCnt = new Uint8Array(8), bCnt = new Uint8Array(8);
+  const wMax = new Int8Array(8).fill(-1);   // самая «задняя» белая пешка на вертикали
+  const bMin = new Int8Array(8).fill(8);    // самая «задняя» чёрная пешка на вертикали
+  const wPawns = [], bPawns = [], rooks = [];
+  let bishopsW = 0, bishopsB = 0;
+  for (let s = 21; s <= 98; s++) {
+    if (!ON[s]) continue;
+    const p = b[s];
+    if (p === null) continue;
+    const pt = Math.abs(p);
+    const r = Math.floor(s / 10) - 2, c = s % 10 - 1;
+    if (pt === PAWN) {
+      if (p > 0) { wCnt[c]++; if (r > wMax[c]) wMax[c] = r; wPawns.push(s); }
+      else { bCnt[c]++; if (r < bMin[c]) bMin[c] = r; bPawns.push(s); }
+    } else if (pt === ROOK) rooks.push(s);
+    else if (pt === BISHOP) { if (p > 0) bishopsW++; else bishopsB++; }
+  }
+
+  let extra = 0;   // оценка с точки зрения белых
+  if (bishopsW >= 2) extra += 30;
+  if (bishopsB >= 2) extra -= 30;
+
+  for (const s of wPawns) {
+    const r = Math.floor(s / 10) - 2, c = s % 10 - 1;
+    if (wCnt[c] > 1) extra -= 10;                                            // сдвоенная
+    if ((c === 0 || wCnt[c - 1] === 0) && (c === 7 || wCnt[c + 1] === 0)) extra -= 12; // изолированная
+    let passed = true;
+    for (let f = Math.max(0, c - 1); f <= Math.min(7, c + 1); f++) if (bMin[f] < r) passed = false;
+    if (passed) extra += PASS_BONUS[Math.max(0, Math.min(6, 6 - r))];
+  }
+  for (const s of bPawns) {
+    const r = Math.floor(s / 10) - 2, c = s % 10 - 1;
+    if (bCnt[c] > 1) extra += 10;
+    if ((c === 0 || bCnt[c - 1] === 0) && (c === 7 || bCnt[c + 1] === 0)) extra += 12;
+    let passed = true;
+    for (let f = Math.max(0, c - 1); f <= Math.min(7, c + 1); f++) if (wMax[f] > r) passed = false;
+    if (passed) extra -= PASS_BONUS[Math.max(0, Math.min(6, r - 1))];
+  }
+
+  for (const s of rooks) {
+    const c = s % 10 - 1;
+    if (b[s] > 0) { if (wCnt[c] === 0) extra += bCnt[c] === 0 ? 20 : 10; }
+    else if (bCnt[c] === 0) extra -= wCnt[c] === 0 ? 20 : 10;
+  }
+
+  extra += shieldScore(b, pos.kingSq[2], PAWN, -1) - shieldScore(b, pos.kingSq[0], -PAWN, 1);
+
+  const base = evaluatePST(pos);   // уже с точки зрения стороны, которой ходить
+  return base + (pos.turn === WHITE ? extra : -extra) + TEMPO;
 }
 
 // ---------- Поиск ----------
@@ -462,7 +597,7 @@ class Search {
   negamax(pos, depth, alpha, beta, ply) {
     this.nodes++;
     if ((this.nodes & 1023) === 0 && now() - this.start > this.limit) { this.stop = true; throw TIMEOUT; }
-    if (pos.halfmove >= 100) return 0;
+    if (pos.halfmove >= 100 || isRepeat(pos) || insufficient(pos)) return 0;
 
     const key = keyOf(pos);
     const entry = this.tt.get(key);
@@ -484,6 +619,15 @@ class Search {
 
     const inCheck = isInCheck(pos, pos.turn);
     if (inCheck) depth = Math.min(depth + 1, 40);
+
+    // Null-move pruning: если даже пропуск хода даёт >= beta, отсекаем
+    if (!inCheck && depth >= 3 && beta < MATE - 100 && evaluate(pos) >= beta && hasNonPawn(pos)) {
+      const R = depth >= 6 ? 3 : 2;
+      makeNull(pos);
+      const ns = -this.negamax(pos, depth - 1 - R, -beta, -beta + 1, ply + 1);
+      unmakeNull(pos);
+      if (ns >= beta) return beta;
+    }
 
     const moves = genLegal(pos);
     if (!moves.length) return inCheck ? -MATE + ply : 0;
@@ -529,6 +673,7 @@ class Search {
     let store = best;
     if (store > MATE - 100) store += ply;
     else if (store < -MATE + 100) store -= ply;
+    if (this.tt.size > 4000000) this.tt.clear();
     this.tt.set(key, [depth, store, flag, bestMove]);
     return best;
   }
@@ -536,6 +681,21 @@ class Search {
   quiesce(pos, alpha, beta, ply) {
     this.nodes++;
     if ((this.nodes & 1023) === 0 && now() - this.start > this.limit) { this.stop = true; throw TIMEOUT; }
+    if (ply >= 16) return evaluate(pos);
+
+    // В шахе стоять нельзя: перебираем все легальные уходы (и видим мат)
+    if (isInCheck(pos, pos.turn)) {
+      const evasions = genLegal(pos);
+      if (!evasions.length) return -MATE + ply;
+      for (const m of this.order(pos, evasions, 0, ply)) {
+        makeMove(pos, m);
+        const score = -this.quiesce(pos, -beta, -alpha, ply + 1);
+        unmakeMove(pos, m);
+        if (score >= beta) return beta;
+        if (score > alpha) alpha = score;
+      }
+      return alpha;
+    }
 
     const stand = evaluate(pos);
     if (stand >= beta) return beta;
@@ -551,6 +711,12 @@ class Search {
     scored.sort((a, b) => b[0] - a[0]);
 
     for (const [, m] of scored) {
+      // дельта-отсечение: даже забрав фигуру, не дотянем до alpha
+      const cap = pos.board[mto(m)];
+      const gain = (mflags(m) & F_EP) ? PIECE_VALUE[PAWN]
+        : (cap !== null ? PIECE_VALUE[Math.abs(cap)] : 0) + (mpromo(m) ? PIECE_VALUE[QUEEN] - PIECE_VALUE[PAWN] : 0);
+      if (stand + gain + 200 < alpha) continue;
+
       makeMove(pos, m);
       if (isInCheck(pos, -pos.turn)) { unmakeMove(pos, m); continue; }
       const score = -this.quiesce(pos, -beta, -alpha, ply + 1);
@@ -659,81 +825,75 @@ if (typeof window !== "undefined") Object.assign(window, ChessEngine);// ===== U
 // Provides UCI protocol interface (postMessage/onmessage) that MainActivity expects,
 // plus MultiPV support (returns top-N moves) that cheat.js needs.
 
-// ---------- MultiPV search ----------
-// Evaluates ALL root moves (full window, no alpha-beta cutoff at root),
-// returns sorted list of {move, score}. Used instead of Search.search() for MultiPV.
+// ---------- MultiPV search: итеративное углубление, альфа-бета на корне ----------
+// Ходы каждой итерации сортируются по предыдущей (лучше отсечения).
+// Окно хода: beta_child = -(балл N-го лучшего), поэтому для MultiPV=1 это обычный
+// корневой альфа-бета. Ходы хуже N-го лучшего получают лишь верхнюю оценку.
 Search.prototype.searchMultiPV = function(pos, opts) {
   var o = opts || {};
-  var timeMs = o.timeMs || 3000;
+  var hardMs = o.timeMs || 3000;
+  var softMs = o.softMs || hardMs * 0.5;
   var maxDepth = o.maxDepth || 64;
-  var mpv = o.multiPV || 1;
+  var mpv = Math.max(1, o.multiPV || 1);
   var onInfo = o.onInfo;
 
   this.start = now();
-  this.limit = timeMs;
+  this.limit = hardMs;
   this.nodes = 0;
   this.stop = false;
   this.killers = Array.from({ length: 64 }, function() { return [0, 0]; });
 
-  var lastResults = [];
+  var rootMoves = genLegal(pos);
+  if (!rootMoves.length) return [{ move: 0, score: isInCheck(pos, pos.turn) ? -MATE : 0 }];
 
+  var lastResults = [];
   for (var d = 1; d <= maxDepth; d++) {
+    var results = [];
     try {
-      var moves = genLegal(pos);
-      if (!moves.length) {
-        var mateScore = isInCheck(pos, pos.turn) ? -MATE : 0;
-        lastResults = [{ move: 0, score: mateScore }];
-        if (onInfo) onInfo({
-          depth: d,
-          results: lastResults,
-          nodes: this.nodes,
-          time: (now() - this.start) / 1000
-        });
-        break;
+      var ordered;
+      if (lastResults.length) {
+        ordered = lastResults.map(function(r) { return r.move; });
+      } else {
+        var e0 = this.tt.get(keyOf(pos));
+        ordered = this.order(pos, rootMoves, e0 ? e0[3] : 0, 0);
       }
 
-      var e = this.tt.get(keyOf(pos));
-      var ttm = e ? e[3] : 0;
-      var ordered = this.order(pos, moves, ttm, 0);
-
-      var results = [];
+      var threshold = -INF;   // балл N-го лучшего хода пока что
       for (var i = 0; i < ordered.length; i++) {
         var m = ordered[i];
         makeMove(pos, m);
-        var score = -this.negamax(pos, d - 1, -INF, INF, 1);
+        var score = -this.negamax(pos, d - 1, -INF, -threshold, 1);
         unmakeMove(pos, m);
         if (this.stop) throw TIMEOUT;
         results.push({ move: m, score: score });
+        if (results.length >= mpv) {
+          var sc = results.map(function(r) { return r.score; }).sort(function(a, b) { return b - a; });
+          threshold = sc[mpv - 1];
+        }
       }
 
       results.sort(function(a, b) { return b.score - a.score; });
       lastResults = results;
 
       var el = now() - this.start;
-      if (onInfo) onInfo({
-        depth: d,
-        results: results.slice(0, mpv),
-        nodes: this.nodes,
-        time: el / 1000
-      });
+      if (onInfo) onInfo({ depth: d, results: results.slice(0, mpv), nodes: this.nodes, time: el / 1000 });
 
       if (Math.abs(results[0].score) > MATE - 100) break;
-      if (el > timeMs * 0.45) break;
+      if (el > softMs) break;
     } catch (err) {
       if (err === TIMEOUT) break;
       throw err;
     }
   }
 
-  return lastResults;
+  return lastResults.slice(0, mpv);
 };
 
 // ---------- UCI Protocol Adapter ----------
 (function() {
-  var pos = null;
+  var posArgs = null;      // аргументы последней команды position (историю партии сохраняем целиком)
   var multiPV = 1;
-  var searchInst = null;
-  var stopFlag = false;
+  var searchInst = null;   // один Search на партию: таблица переиспользуется между ходами
 
   function send(line) {
     if (typeof postMessage === 'function') postMessage(line);
@@ -741,10 +901,34 @@ Search.prototype.searchMultiPV = function(pos, opts) {
 
   function formatScore(score) {
     if (Math.abs(score) > MATE - 100) {
-      var dist = Math.ceil((MATE - Math.abs(score)));
-      return 'mate ' + (score > 0 ? dist : -dist);
+      var plies = MATE - Math.abs(score);
+      var moves = Math.ceil(plies / 2);
+      return 'mate ' + (score > 0 ? moves : -moves);
     }
     return 'cp ' + score;
+  }
+
+  function buildPos(args) {
+    if (!args) return null;
+    var p = null;
+    if (args[0] === 'startpos') {
+      p = ChessEngine.Position.start();
+      var mi = args.indexOf('moves');
+      if (mi >= 0) ChessEngine.applyUciMoves(p, args.slice(mi + 1));
+    } else if (args[0] === 'fen') {
+      var fenParts = [];
+      var i = 1;
+      while (i < args.length && args[i] !== 'moves') { fenParts.push(args[i]); i++; }
+      p = ChessEngine.fromFen(fenParts.join(' '));
+      if (i < args.length && args[i] === 'moves') ChessEngine.applyUciMoves(p, args.slice(i + 1));
+    }
+    return p;
+  }
+
+  function getSearch() {
+    if (!searchInst) searchInst = new ChessEngine.Search();
+    if (searchInst.tt.size > 4000000) searchInst.tt.clear();
+    return searchInst;
   }
 
   function handleCommand(line) {
@@ -753,9 +937,7 @@ Search.prototype.searchMultiPV = function(pos, opts) {
     if (!line) return;
 
     var parts = line.split(/\s+/);
-    var cmd = parts[0];
-
-    switch (cmd) {
+    switch (parts[0]) {
       case 'uci':
         send('id name ChessAssist Custom Engine');
         send('id author erafox');
@@ -780,92 +962,82 @@ Search.prototype.searchMultiPV = function(pos, opts) {
         break;
 
       case 'ucinewgame':
-        pos = null;
+        posArgs = null;
+        searchInst = null;   // новая партия: чистая таблица
         break;
 
       case 'position':
-        handlePosition(parts.slice(1));
+        posArgs = parts.slice(1);
         break;
 
       case 'go':
         handleGo(parts.slice(1));
         break;
 
-      case 'stop':
-        stopFlag = true;
-        if (searchInst) searchInst.stop = true;
-        break;
-
       case 'quit':
-        pos = null;
-        stopFlag = true;
-        if (searchInst) searchInst.stop = true;
+        posArgs = null;
         break;
-    }
-  }
-
-  function handlePosition(args) {
-    if (args[0] === 'startpos') {
-      pos = ChessEngine.Position.start();
-      var mi = args.indexOf('moves');
-      if (mi >= 0) ChessEngine.applyUciMoves(pos, args.slice(mi + 1));
-    } else if (args[0] === 'fen') {
-      var fenParts = [];
-      var i = 1;
-      while (i < args.length && args[i] !== 'moves') {
-        fenParts.push(args[i]);
-        i++;
-      }
-      pos = ChessEngine.fromFen(fenParts.join(' '));
-      if (i < args.length && args[i] === 'moves') {
-        ChessEngine.applyUciMoves(pos, args.slice(i + 1));
-      }
+      // 'stop': поиск синхронный, прервать его нельзя; лимит времени задан в go
     }
   }
 
   function handleGo(args) {
-    if (!pos) return;
-    var timeMs = 3000;
-    for (var i = 0; i < args.length; i++) {
-      if (args[i] === 'movetime' && i + 1 < args.length) {
-        timeMs = parseInt(args[i + 1], 10) || 3000;
-      }
+    var work = buildPos(posArgs);
+    if (!work) return;
+
+    var t = { movetime: 0, wtime: 0, btime: 0, winc: 0, binc: 0, movestogo: 0, depth: 0 };
+    for (var i = 0; i + 1 < args.length; i++) {
+      if (Object.prototype.hasOwnProperty.call(t, args[i])) t[args[i]] = parseInt(args[i + 1], 10) || 0;
     }
-    runSearch(timeMs);
+
+    var left = work.turn > 0 ? t.wtime : t.btime;
+    var inc = work.turn > 0 ? t.winc : t.binc;
+    var soft, hard;
+    if (t.movetime) {
+      soft = hard = t.movetime;
+    } else if (left) {
+      // Бюджет на ход: доля остатка + большая часть инкремента; жёсткий лимит x3, но не больше 80% остатка
+      var mtg = t.movestogo > 0 ? Math.min(t.movestogo, 40) : 30;
+      soft = Math.min(left / mtg + inc * 0.8, left * 0.5);
+      hard = Math.min(soft * 3, left * 0.8);
+    } else {
+      soft = hard = t.depth ? 1e9 : 3000;
+    }
+    soft = Math.max(10, soft);
+    hard = Math.max(soft, hard);
+
+    runSearch(work, { soft: soft, hard: hard, maxDepth: t.depth || 64 });
   }
 
-  function runSearch(timeMs) {
-    stopFlag = false;
-    searchInst = new ChessEngine.Search();
-
-    var results = searchInst.searchMultiPV(pos, {
-      timeMs: timeMs,
-      maxDepth: 64,
+  function runSearch(work, cfg) {
+    var s = getSearch();
+    var results = s.searchMultiPV(work, {
+      timeMs: cfg.hard,
+      softMs: cfg.soft,
+      maxDepth: cfg.maxDepth,
       multiPV: multiPV,
       onInfo: function(info) {
-        if (stopFlag) return;
+        var nps = info.time > 0 ? Math.round(info.nodes / info.time) : 0;
         for (var i = 0; i < info.results.length; i++) {
           var r = info.results[i];
-          var moveUci = r.move ? ChessEngine.moveToUci(r.move) : '0000';
           send('info depth ' + info.depth +
                ' score ' + formatScore(r.score) +
                ' multipv ' + (i + 1) +
                ' nodes ' + info.nodes +
+               ' nps ' + nps +
                ' time ' + Math.round(info.time * 1000) +
-               ' pv ' + moveUci);
+               ' pv ' + (r.move ? ChessEngine.moveToUci(r.move) : '0000'));
         }
       }
     });
 
-    var best = '(none)';
+    var best = '0000';
     if (results && results.length > 0 && results[0].move) {
       best = ChessEngine.moveToUci(results[0].move);
     }
     send('bestmove ' + best);
-    searchInst = null;
   }
 
-  // Set up the onmessage handler — the host (MainActivity) calls this with {data: "uci"}
   onmessage = function(e) {
     handleCommand(e);
   };
