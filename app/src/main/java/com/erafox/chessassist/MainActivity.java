@@ -391,7 +391,7 @@ public class MainActivity extends Activity {
             pushConfig();
             return true;
         }
-        if (url.startsWith("https://t.me/") || url.startsWith("http://t.me/")) {
+        if (url.startsWith("https://github.com/") || url.startsWith("http://github.com/")) {
             try {
                 startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(url)));
             } catch (Exception ignored) {}
