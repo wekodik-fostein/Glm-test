@@ -25,6 +25,8 @@
     proctorGuard: true,
     review: false,
     advantage: false,
+    pure: false,
+    openings: false,
     style: 'squares',
     fromColor: '#14B8A6',
     toColor: '#14B8A6',
@@ -94,6 +96,9 @@
   root.addEventListener('selectstart', function (e) { e.preventDefault(); });
 
   // ---------- panel drag ----------
+  // The panel floats above the page, so it can be parked anywhere. Position is
+  // kept as a translate offset from the flex-centred layout: no reflow, no
+  // fight with the open/close animations, and the board keeps spinning.
   var panelPos = { x: 0, y: 0 };
   var panelDrag = null;
 
@@ -152,6 +157,8 @@
     panelDrag = null;
     panel.style.cursor = 'grab';
   }
+  // A real grip instead of touch-action:none on the whole panel: keeps the
+  // function stack scrollable and the accuracy slider draggable.
   var dragGrip = el('div',
     'position:absolute;left:0;top:0;right:0;height:38px;z-index:0;' +
     'touch-action:none;cursor:grab;background:transparent;', panel);
@@ -521,6 +528,24 @@
     jelly(auto.button);
   });
 
+  // ---------- pure engine ----------
+  var pure = makeRow('pure', 'Чистый движок', false);
+  pure.button.addEventListener('click', function () {
+    cfg.pure = !cfg.pure;
+    paintRow('pure', cfg.pure);
+    queue();
+    jelly(pure.button);
+  });
+
+  // ---------- openings ----------
+  var openings = makeRow('openings', 'Открытия', false);
+  openings.button.addEventListener('click', function () {
+    cfg.openings = !cfg.openings;
+    paintRow('openings', cfg.openings);
+    queue();
+    jelly(openings.button);
+  });
+
   // ---------- review (разбор ходов, в духе chess.com) ----------
   var review = makeRow('review', 'Разбор ходов', true);
   bindDots('review');
@@ -559,11 +584,151 @@
   var rvBarFill = el('div',
     'position:absolute;left:0;top:0;bottom:0;width:50%;border-radius:999px;background:#f2f1ed;' +
     'transition:width 400ms ease;', rvBarWrap);
+  var rvGraphWrap = el('div',
+    'position:relative;height:56px;margin:8px 0 2px;border-radius:8px;overflow:hidden;' +
+    'background:#232220;box-shadow:inset 0 0 0 1px rgba(255,255,255,.12);', reviewInner);
+  rvGraphWrap.className = 'glass-review-graph';
+  var rvGraph = el('canvas', 'display:block;width:100%;height:100%;', rvGraphWrap);
   var rvList = el('div',
     'max-height:190px;overflow-y:auto;overflow-x:hidden;scrollbar-width:thin;', reviewInner);
   var rvSum = el('div',
     'margin-top:8px;color:rgba(255,255,255,.62);font:500 10px/1.5 Inter,"Segoe UI",system-ui,sans-serif;white-space:pre-line;',
     reviewInner, 'Партия не начата');
+  var rvPgn = el('button',
+    'margin-top:8px;width:100%;border:0;border-radius:8px;padding:7px;background:rgba(255,255,255,.1);' +
+    'color:rgba(255,255,255,.82);font:500 11px/1 Inter,"Segoe UI",system-ui,sans-serif;cursor:pointer;' +
+    'transition:color 280ms ease;', reviewInner, 'Копировать PGN');
+  rvPgn.type = 'button';
+
+  // График перевеса: кривая оценки по всем ходам, как в game review.
+  var rvGraphSig = '';
+  function drawGraph(st) {
+    var c = rvGraph;
+    if (!c || !c.getContext) return;
+    var w = rvGraphWrap.clientWidth || 280, h = 56;
+    var dpr = window.devicePixelRatio || 1;
+    if (c.width !== Math.round(w * dpr) || c.height !== Math.round(h * dpr)) {
+      c.width = Math.round(w * dpr);
+      c.height = Math.round(h * dpr);
+    }
+    var ctx = c.getContext('2d');
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, w, h);
+    var sig = st.total + '|' + st.moves.map(function (m) { return m.evalWhite; }).join(',');
+    if (sig === rvGraphSig) return;
+    rvGraphSig = sig;
+    var pts = [0], i;
+    for (i = 0; i < st.moves.length; i++) {
+      var cp = st.moves[i].evalWhite || 0;
+      pts.push(cp);
+    }
+    if (pts.length === 1) pts.push(0);   // пустая партия: ровная линия по центру
+    var span = Math.max(1, pts.length - 1);
+    var shareAt = function (cp) {
+      return 1 / (1 + Math.pow(10, -cp / 400));
+    };
+    var xs = [], ys = [];
+    for (i = 0; i < pts.length; i++) {
+      xs.push(pts.length > 1 ? (i / span) * (w - 2) + 1 : w / 2);
+      ys.push(shareAt(pts[i]) * (h - 4) + 2);
+    }
+    for (var x = 0; x < w; x++) {
+      var t = (x - 1) / (w - 2) * span;
+      var k = Math.max(0, Math.min(span - 1, Math.floor(t)));
+      var f = Math.max(0, Math.min(1, t - k));
+      var s = ys[k] + (ys[Math.min(span, k + 1)] - ys[k]) * f;
+      ctx.fillStyle = '#e8e6e1';
+      ctx.fillRect(x, 0, 1, Math.max(1, s));
+      ctx.fillStyle = '#191817';
+      ctx.fillRect(x, s, 1, h - s);
+    }
+    ctx.strokeStyle = 'rgba(255,255,255,.22)';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(0, h / 2);
+    ctx.lineTo(w, h / 2);
+    ctx.stroke();
+    ctx.strokeStyle = '#26c2a3';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    for (i = 0; i < xs.length; i++) {
+      if (i) ctx.lineTo(xs[i], ys[i]);
+      else ctx.moveTo(xs[i], ys[i]);
+    }
+    ctx.stroke();
+    for (i = 0; i < st.moves.length; i++) {
+      if (st.moves[i].label !== 'Зевок') continue;
+      ctx.fillStyle = '#fa412d';
+      ctx.beginPath();
+      ctx.arc(xs[i + 1], ys[i + 1], 3, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  }
+
+  var rvPgnBusy = false;
+  rvPgn.addEventListener('click', function (e) {
+    e.stopPropagation();
+    if (rvPgnBusy) return;
+    var cf = window.__ca;
+    var pgn = cf && typeof cf.getPgn === 'function' ? cf.getPgn() : null;
+    if (!pgn || !pgn.ok) {
+      rvPgn.textContent = 'Партия не начата';
+      setTimeout(function () { rvPgn.textContent = 'Копировать PGN'; }, 1600);
+      return;
+    }
+    var done = function (ok) {
+      rvPgnBusy = false;
+      rvPgn.textContent = ok ? 'Скопировано' : 'Не удалось скопировать';
+      setTimeout(function () { rvPgn.textContent = 'Копировать PGN'; }, 1800);
+    };
+    rvPgnBusy = true;
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(pgn.text).then(function () { done(true); }, function () {
+        fallbackCopy(pgn.text, done);
+      });
+    } else {
+      fallbackCopy(pgn.text, done);
+    }
+  });
+  function fallbackCopy(text, done) {
+    try {
+      var ta = document.createElement('textarea');
+      ta.value = text;
+      ta.setAttribute('readonly', 'readonly');
+      ta.style.cssText = 'position:fixed;left:-9999px;top:0;';
+      document.body.appendChild(ta);
+      ta.select();
+      var ok = false;
+      try { ok = document.execCommand('copy'); } catch (er) { ok = false; }
+      document.body.removeChild(ta);
+      if (!ok) showPgnSheet(text);
+      done(ok);
+    } catch (er) {
+      showPgnSheet(text);
+      done(false);
+    }
+  }
+  function showPgnSheet(text) {
+    var ov = el('div',
+      'position:fixed;left:0;right:0;top:0;bottom:0;z-index:2147483647;background:rgba(0,0,0,.72);' +
+      'display:flex;align-items:center;justify-content:center;padding:18px;', document.body);
+    var box = el('div',
+      'width:100%;max-width:420px;padding:12px;border-radius:12px;background:#232220;display:flex;' +
+      'flex-direction:column;gap:8px;', ov);
+    var ta = el('textarea',
+      'width:100%;height:170px;border:0;border-radius:8px;padding:8px;background:#191817;color:#f2f1ed;' +
+      'font:500 10px/1.4 monospace;resize:none;', box);
+    ta.value = text;
+    ta.setAttribute('readonly', 'readonly');
+    var hint = el('div',
+      'color:rgba(255,255,255,.6);font:500 10px/1.4 Inter,sans-serif;', box,
+      'Скопируйте вручную: удерживайте текст и выберите «Копировать».');
+    var closeB = el('button',
+      'border:0;border-radius:8px;padding:8px;background:rgba(255,255,255,.14);color:#f2f1ed;' +
+      'font:500 11px/1 Inter,sans-serif;cursor:pointer;', box, 'Закрыть');
+    closeB.type = 'button';
+    closeB.addEventListener('click', function () { document.body.removeChild(ov); });
+  }
 
   var rvSig = '';
   function fmtRvSum(s) {
@@ -577,6 +742,7 @@
     rvEval.textContent = st.evalText;
     rvEval.style.color = st.evalWhite > 60 ? '#ffffff' : (st.evalWhite < -60 ? '#b5b1ac' : TEXT);
     rvBarFill.style.width = Math.round(st.share * 100) + '%';
+    drawGraph(st);
     var sig = st.total + '|' + st.evalText + '|' +
       (st.moves.length ? st.moves[st.moves.length - 1].label : '');
     if (sig === rvSig) return;
@@ -684,6 +850,33 @@
     advFill.style.height = Math.round(st.share * 100) + '%';
     advText.textContent = st.evalText;
     advText.style.color = st.evalWhite >= 0 ? '#f2f1ed' : '#a9a5a0';
+  }
+
+  // ---------- stats (статистика сессии) ----------
+  var stats = makeRow('stats', 'Статистика', true);
+  bindDots('stats');
+  stats.button.addEventListener('click', function () {
+    toggleMenu('stats');
+    jelly(stats.button);
+  });
+  var statsInner = menuFor('stats');
+  var statsText = el('div',
+    'color:rgba(255,255,255,.72);font:500 11px/1.7 Inter,"Segoe UI",system-ui,sans-serif;white-space:pre-line;',
+    statsInner, 'Нет данных');
+  function renderStats() {
+    var s = window.__ca && typeof window.__ca.getSessionStats === 'function'
+      ? window.__ca.getSessionStats() : null;
+    if (!s || (!s.games && !s.myMoves && !s.oppMoves)) {
+      statsText.textContent = 'Нет данных';
+      return;
+    }
+    statsText.textContent =
+      'Партий: ' + s.games +
+      '\nМоих ходов разобрано: ' + s.myMoves +
+      '\nМоя точность: ' + (s.myMoves ? s.myAcc + '%' : '\u2014') +
+      '\nМоих зевков: ' + s.myBlunders +
+      '\nХодов соперника разобрано: ' + s.oppMoves +
+      '\nЗевков у соперника: ' + s.oppBlunders;
   }
 
   // ---------- color popup ----------
@@ -850,6 +1043,8 @@
       '&proctorGuard=' + (cfg.proctorGuard ? 1 : 0) +
       '&review=' + (cfg.review ? 1 : 0) +
       '&advantage=' + (cfg.advantage ? 1 : 0) +
+      '&pure=' + (cfg.pure ? 1 : 0) +
+      '&openings=' + (cfg.openings ? 1 : 0) +
       '&style=' + cfg.style +
       '&fromColor=' + encodeURIComponent(cfg.fromColor) +
       '&toColor=' + encodeURIComponent(cfg.toColor) +
@@ -921,6 +1116,7 @@
     if (cfg.advantage) updateAdvantage();
     if (cfg.review) updateReviewBadge();
     if (openMenu === 'review') renderReview();
+    if (openMenu === 'stats') renderStats();
   }, 240);
 
   // ---------- open / close / apply ----------
@@ -975,6 +1171,8 @@
     if (typeof c.proctorGuard === 'boolean') cfg.proctorGuard = c.proctorGuard;
     if (typeof c.review === 'boolean') cfg.review = c.review;
     if (typeof c.advantage === 'boolean') cfg.advantage = c.advantage;
+    if (typeof c.pure === 'boolean') cfg.pure = c.pure;
+    if (typeof c.openings === 'boolean') cfg.openings = c.openings;
     if (typeof c.arrows === 'boolean') cfg.arrows = c.arrows;
     if (c.style === 'arrows' || c.style === 'squares') {
       cfg.style = c.style;
@@ -987,6 +1185,8 @@
     paintRow('auto', cfg.auto);
     paintRow('review', cfg.review);
     paintRow('advantage', cfg.advantage);
+    paintRow('pure', cfg.pure);
+    paintRow('openings', cfg.openings);
     paintAccuracy();
     renderSeg();
     renderColors();
