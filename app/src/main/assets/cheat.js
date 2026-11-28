@@ -60,6 +60,14 @@
         awayMs: 0,
         awayCount: 0,
         proctor: false,
+        bookShown: '',
+        statsGames: 0,
+        statsMyMoves: 0,
+        statsMyLoss: 0,
+        statsMyBlunders: 0,
+        statsOppMoves: 0,
+        statsOppLoss: 0,
+        statsOppBlunders: 0,
         config: {
             accuracy: 78,
             accuracyOn: false,
@@ -70,6 +78,8 @@
             focusPause: true,
             weakMoves: false,
             proctorGuard: true,
+            pure: false,
+            openings: false,
             style: 'arrows',
             fromColor: '#14B8A6',
             toColor: '#14B8A6',
@@ -148,7 +158,15 @@
 
     CF.setConfig = function (c) {
         if (!c) return CF.config;
-        var accChanged = false, multiChanged = false, ratingChanged = false;
+        var accChanged = false, multiChanged = false, ratingChanged = false, pureChanged = false;
+        if (typeof c.pure === 'boolean' && c.pure !== CF.config.pure) {
+            CF.config.pure = c.pure;
+            pureChanged = true;
+        }
+        if (typeof c.openings === 'boolean') {
+            CF.config.openings = c.openings;
+            if (!c.openings) CF.bookShown = '';
+        }
         if (typeof c.accuracyOn === 'boolean' && c.accuracyOn !== CF.config.accuracyOn) {
             CF.config.accuracyOn = c.accuracyOn;
             accChanged = true;
@@ -186,11 +204,13 @@
 
         // Re-pick from the already analysed candidates: changing strength or the
         // number of lines must not restart the search on every slider tick.
-        if (CF.board && CF.side === CF.myColor && (accChanged || multiChanged || ratingChanged)) {
+        // While a book hint is showing the candidates are ignored on purpose.
+        if (CF.board && CF.side === CF.myColor && !CF.bookShown &&
+                (accChanged || multiChanged || ratingChanged || pureChanged)) {
             var list = CF.candidates.filter(function (x) { return !!x; });
             list.sort(function (x, y) { return y.cp - x.cp; });
             if (list.length) {
-                if (accChanged || ratingChanged || !CF.chosen) {
+                if (accChanged || ratingChanged || pureChanged || !CF.chosen) {
                     CF.chosen = chooseMove(list, moveFeatures(list[0].mv, list));
                     CF.hint = CF.chosen.mv;
                     var pc = CF.board[sqIndex(CF.chosen.mv.slice(0, 2))];
@@ -595,6 +615,8 @@
     function chooseMove(list, feat) {
         if (!list || !list.length) return null;
         if (list.length < 2) return list[0];
+        // Pure engine mode: no Elo shaping, the top line is the answer.
+        if (CF.config.pure) return list[0];
         var target = CF.config.accuracyOn ? effectiveAccuracy(feat) : ratingAccuracy();
         return pickAtAccuracy(list, target);
     }
@@ -611,6 +633,7 @@
         if (CF.config.multi) {
             // Variants must match the strength actually being played: near the
             // Elo target when accuracy is off, near the slider target when on.
+            // Pure engine mode shows the runner-up lines by rank instead.
             var target = displayTarget();
             var pool = [];
             for (var i = 0; i < list.length; i++) {
@@ -619,7 +642,11 @@
                 pool.push({ mv: list[i].mv, cp: list[i].cp, acc: acc, main: false,
                             d: Math.abs(acc - target) });
             }
-            pool.sort(function (a, b) { return a.d - b.d; });
+            if (CF.config.pure) {
+                pool.sort(function (a, b) { return b.cp - a.cp; });
+            } else {
+                pool.sort(function (a, b) { return a.d - b.d; });
+            }
             for (var j = 0; j < pool.length && out.length < 3; j++) out.push(pool[j]);
             out.sort(function (a, b) { return b.acc - a.acc; });
         }
@@ -639,6 +666,12 @@
             CF.reanalyze = false;
             CF.pendingFen = '';
             maybeAnalyze();
+            return;
+        }
+        // Книга уже показала ход: движок доработал в фоне, разбор обновлён,
+        // но подсказку перебирать нельзя — на доске должен остаться ход книги.
+        if (CF.bookShown && CF.bookShown === currentFen()) {
+            CF.bookShown = '';
             return;
         }
         if (Date.now() - CF.analyzeAt < 120) return;
@@ -662,7 +695,7 @@
         var chosen = chooseMove(list, feat);
         feat = moveFeatures(chosen.mv, list);
         planTiming(feat);
-        var planned = plannedWeakMove(list, feat);
+        var planned = CF.config.pure ? null : plannedWeakMove(list, feat);
         if (planned) chosen = planned;
         var pc = CF.board && CF.board[sqIndex(chosen.mv.slice(0, 2))];
         if (pc && pc.c !== CF.myColor) {
@@ -1130,6 +1163,9 @@
                 RV.lastOurCp = played.cp;
                 RV.evalWhite = mover === 'w' ? played.cp : -played.cp;
                 RV.evalMate = played.mate ? (RV.evalWhite > 0 ? e.mate : -e.mate) : 0;
+                CF.statsMyMoves++;
+                CF.statsMyLoss += e.loss;
+                if (e.label === RV.LBL.blunder) CF.statsMyBlunders++;
             } else if (best && list.length) {
                 // Ход вне топа MultiPV: точная потеря движку неизвестна, но она
                 // не меньше разницы между лучшим и худшим из показанных ходов
@@ -1173,6 +1209,9 @@
             RV.pending.label = RV.classify(loss);
             RV.pending.cp = -best.cp;
             RV.pending.mate = best.mate ? -Math.max(1, best.mateN || 1) : 0;
+            CF.statsOppMoves++;
+            CF.statsOppLoss += loss;
+            if (RV.pending.label === RV.LBL.blunder) CF.statsOppBlunders++;
         }
         RV.pending = null;
     };
@@ -1217,6 +1256,113 @@
         };
     };
 
+    // Статистика сессии: копится по всем распознанным ходам между играми,
+    // сбрасывается только перезапуском WebView (новая сессия приложения).
+    CF.getSessionStats = function () {
+        var acc = 0;
+        if (CF.statsMyMoves) {
+            var avg = CF.statsMyLoss / CF.statsMyMoves;
+            acc = Math.round(Math.max(5, Math.min(99, 100 * Math.exp(-avg / 120))));
+        }
+        return {
+            games: CF.statsGames,
+            myMoves: CF.statsMyMoves,
+            myAcc: acc,
+            myBlunders: CF.statsMyBlunders,
+            oppMoves: CF.statsOppMoves,
+            oppBlunders: CF.statsOppBlunders
+        };
+    };
+
+    // Экспорт текущей партии в PGN из записанных SAN-ходов разбора.
+    CF.getPgn = function () {
+        var sans = [], i;
+        for (i = 0; i < RV.hist.length; i++) {
+            if (RV.hist[i].san) sans.push(RV.hist[i].san);
+        }
+        if (!sans.length) return { ok: false, text: '' };
+        var d = new Date();
+        var pad = function (x) { return (x < 10 ? '0' : '') + x; };
+        var date = d.getFullYear() + '.' + pad(d.getMonth() + 1) + '.' + pad(d.getDate());
+        var out = '[Event "Chess Assist"]\n[Site "chess.com"]\n[Date "' + date + '"]\n' +
+            '[White "' + (CF.myColor === 'w' ? 'Me' : 'Opponent') + '"]\n' +
+            '[Black "' + (CF.myColor === 'b' ? 'Me' : 'Opponent') + '"]\n' +
+            '[Result "*"]\n\n';
+        var line = '';
+        for (i = 0; i < sans.length; i++) {
+            if (i % 2 === 0) line += (i / 2 + 1) + '. ';
+            line += sans[i] + ' ';
+            if (line.length > 72) { out += line.trim() + '\n'; line = ''; }
+        }
+        if (line.trim()) out += line.trim() + ' ';
+        out += '*';
+        return { ok: true, text: out };
+    };
+
+    // ---------- openings (дебютная книга) ----------
+    // Короткие проверенные заготовки в uci. Совпадение по префиксу партии:
+    // пока ходы совпадают с линией, подсказка берётся из книги без движка.
+    var BOOK = [
+        { name: 'Итальянская партия',
+          mv: ['e2e4', 'e7e5', 'g1f3', 'b8c6', 'f1c4', 'f8c5', 'e1g1', 'g8f6', 'd2d3', 'd7d6', 'c2c3'] },
+        { name: 'Испанская партия',
+          mv: ['e2e4', 'e7e5', 'g1f3', 'b8c6', 'f1b5', 'a7a6', 'b5a4', 'g8f6', 'e1g1', 'f8e7', 'f1e1', 'b7b5'] },
+        { name: 'Ферзевый гамбит',
+          mv: ['d2d4', 'd7d5', 'c2c4', 'e7e6', 'b1c3', 'g8f6', 'c1g5', 'f8e7', 'e2e3', 'e8g8', 'g1f3', 'b8d7'] },
+        { name: 'Лондонская система',
+          mv: ['d2d4', 'd7d5', 'g1f3', 'g8f6', 'c1f4', 'e7e6', 'e2e3', 'f8e7', 'f1d3', 'e8g8', 'b1d2'] },
+        { name: 'Сицилианская защита',
+          mv: ['e2e4', 'c7c5', 'g1f3', 'd7d6', 'd2d4', 'c5d4', 'f3d4', 'g8f6', 'b1c3', 'a7a6', 'c1e3'] },
+        { name: 'Французская защита',
+          mv: ['e2e4', 'e7e6', 'd2d4', 'd7d5', 'b1c3', 'g8f6', 'e4e5', 'b8d7', 'f2f4', 'c7c5', 'g1f3'] },
+        { name: 'Защита Каро-Канн',
+          mv: ['e2e4', 'c7c6', 'd2d4', 'd7d5', 'b1c3', 'd5e4', 'c3e4', 'c8f5', 'g1f3', 'e7e6'] },
+        { name: 'Староиндийская защита',
+          mv: ['d2d4', 'g8f6', 'c2c4', 'g7g6', 'b1c3', 'f8g7', 'e2e4', 'd7d6', 'g1f3', 'e8g8', 'f1e2', 'e7e5'] }
+    ];
+
+    // Рокировка: DOM может дать ход королём e1h1/e1c1, движок — e1g1/e1d1.
+    // Промо обрезаем до четырёх символов. Всё остальное сравниваем как есть.
+    function normBookMv(m) {
+        if (m === 'e1h1' || m === 'e1g1') return 'e1g1';
+        if (m === 'e1c1' || m === 'e1d1') return 'e1d1';
+        if (m === 'e8h8' || m === 'e8g8') return 'e8g8';
+        if (m === 'e8c8' || m === 'e8d8') return 'e8d8';
+        return String(m).slice(0, 4);
+    }
+
+    function bookMove() {
+        if (!CF.config.openings) return null;
+        var hist = RV.hist;
+        if (!hist.length || hist.length > 24) return null;
+        // Линия продолжается только если следующий ход за нами.
+        var mover = hist.length % 2 === 0 ? 'w' : 'b';
+        if (mover !== CF.myColor) return null;
+        var played = [], i, j;
+        for (i = 0; i < hist.length; i++) played.push(normBookMv(hist[i].uci));
+        for (i = 0; i < BOOK.length; i++) {
+            var line = BOOK[i].mv;
+            if (played.length >= line.length) continue;
+            var ok = true;
+            for (j = 0; j < played.length; j++) {
+                if (normBookMv(line[j]) !== played[j]) { ok = false; break; }
+            }
+            if (!ok) continue;
+            var cand = { mv: normBookMv(line[played.length]), name: BOOK[i].name };
+            // Должен быть легальным в текущей позиции (защита от рассинхрона).
+            if (CF.board) {
+                var legal = legalMoves();
+                var found = false;
+                for (j = 0; j < legal.length; j++) {
+                    if (legal[j].slice(0, 4) === cand.mv) { found = true; break; }
+                }
+                if (!found) return null;
+            }
+            return cand;
+        }
+        return null;
+    }
+
     function analyze(fen) {
         if (!engineReady()) return;
         if (!CF.engineInit) {
@@ -1224,6 +1370,29 @@
             initEngine();
         }
         if (CF.busy) return;
+        // Дебютная книга: ход показываем сразу, но движок всё равно считает
+        // эту позицию — разбор ходов (в т.ч. зевки соперника) не прерывается.
+        var bm = bookMove();
+        if (bm) {
+            CF.bookShown = fen;
+            var nowB = Date.now();
+            CF.analyzeAt = nowB;
+            CF.lastThinkMs = 0;
+            planTiming({ complexity: 0.2, kind: 'дебют', capture: false, gap: 0, legal: [] });
+            var pcB = CF.board && CF.board[sqIndex(bm.mv.slice(0, 2))];
+            CF.hint = bm.mv;
+            CF.hintPiece = pcB ? pcB.p : null;
+            CF.chosen = { mv: bm.mv, cp: 0, book: true };
+            CF.display = [{ mv: bm.mv, cp: 0, acc: 100, main: true }];
+            drawHint();
+            status('Открытия: ' + bm.name);
+            CF.autoFen = fen;
+            CF.autoSetAt = nowB;
+            CF.autoDue = nowB + CF.bestDelayMs;
+            if (CF.config.auto) scheduleAuto(fen, bm.mv, Math.max(80, CF.bestDelayMs));
+        } else {
+            CF.bookShown = '';
+        }
         CF.busy = true;
         CF.candidates = [];
         CF.pendingFen = fen;
@@ -1449,6 +1618,7 @@
         var topColor = bottomColor === 'w' ? 'b' : 'w';
         var br = board.getBoundingClientRect();
         var midY = br.top + br.height / 2;
+
         var rows = [], seen = [];
         var rowSel = ['#player-top', '#player-bottom',
             '[data-cy="player-row-top"]', '[data-cy="player-row-bottom"]',
@@ -1895,6 +2065,8 @@
             CF.oppEloMissTurn = -1;
             CF.awayMs = 0;
             CF.awayCount = 0;
+            CF.bookShown = '';
+            CF.statsGames++;
             cancelAuto();
             planBlunders();
             if (!CF.manualTeam) CF.teamLocked = false;
