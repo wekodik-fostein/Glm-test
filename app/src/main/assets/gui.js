@@ -1,4 +1,4 @@
-// JavaScript / gui.js / Android WebView / GlassLab panel, 3 functions, color pickers, timing toast.
+// JavaScript / gui.js / Android WebView / GlassLab panel, 5 functions, color pickers, timing toast, game review + eval bar.
 (function () {
   if (window.__caGui) return;
 
@@ -23,6 +23,8 @@
     focusPause: true,
     weakMoves: false,
     proctorGuard: true,
+    review: false,
+    advantage: false,
     style: 'squares',
     fromColor: '#14B8A6',
     toColor: '#14B8A6',
@@ -92,9 +94,6 @@
   root.addEventListener('selectstart', function (e) { e.preventDefault(); });
 
   // ---------- panel drag ----------
-  // The panel floats above the page, so it can be parked anywhere. Position is
-  // kept as a translate offset from the flex-centred layout: no reflow, no
-  // fight with the open/close animations, and the board keeps spinning.
   var panelPos = { x: 0, y: 0 };
   var panelDrag = null;
 
@@ -153,8 +152,6 @@
     panelDrag = null;
     panel.style.cursor = 'grab';
   }
-  // A real grip instead of touch-action:none on the whole panel: keeps the
-  // function stack scrollable and the accuracy slider draggable.
   var dragGrip = el('div',
     'position:absolute;left:0;top:0;right:0;height:38px;z-index:0;' +
     'touch-action:none;cursor:grab;background:transparent;', panel);
@@ -524,6 +521,171 @@
     jelly(auto.button);
   });
 
+  // ---------- review (разбор ходов, в духе chess.com) ----------
+  var review = makeRow('review', 'Разбор ходов', true);
+  bindDots('review');
+  review.button.addEventListener('click', function () {
+    cfg.review = !cfg.review;
+    paintRow('review', cfg.review);
+    queue();
+    jelly(review.button);
+    if (!cfg.review) hideReviewBadge();
+  });
+
+  var RV_COLORS = {
+    'Лучший': '#26c2a3',
+    'Отличный': '#95bb4a',
+    'Хороший': '#a3b7cd',
+    'Неточность': '#f7c631',
+    'Ошибка': '#ffa459',
+    'Зевок': '#fa412d'
+  };
+
+  function reviewState() {
+    try {
+      return window.__ca && window.__ca.getReviewState ? window.__ca.getReviewState() : null;
+    } catch (e) { return null; }
+  }
+
+  var reviewInner = menuFor('review');
+  var rvHead = el('div',
+    'display:flex;align-items:center;gap:8px;margin-bottom:8px;', reviewInner);
+  var rvEval = el('span',
+    'flex:none;min-width:44px;font:600 13px/1 Inter,"Segoe UI",system-ui,sans-serif;color:' + TEXT + ';',
+    rvHead, '+0.00');
+  var rvBarWrap = el('div',
+    'position:relative;flex:1;height:10px;border-radius:999px;background:#3a3937;overflow:hidden;' +
+    'box-shadow:inset 0 0 0 1px rgba(255,255,255,.14);', rvHead);
+  var rvBarFill = el('div',
+    'position:absolute;left:0;top:0;bottom:0;width:50%;border-radius:999px;background:#f2f1ed;' +
+    'transition:width 400ms ease;', rvBarWrap);
+  var rvList = el('div',
+    'max-height:190px;overflow-y:auto;overflow-x:hidden;scrollbar-width:thin;', reviewInner);
+  var rvSum = el('div',
+    'margin-top:8px;color:rgba(255,255,255,.62);font:500 10px/1.5 Inter,"Segoe UI",system-ui,sans-serif;white-space:pre-line;',
+    reviewInner, 'Партия не начата');
+
+  var rvSig = '';
+  function fmtRvSum(s) {
+    if (!s.n) return 'нет ходов';
+    return 'зевков ' + s.blunder + ', ошибок ' + s.mistake + ', неточностей ' + s.inaccuracy +
+      ', ср. потеря ' + (s.loss / s.n / 100).toFixed(2);
+  }
+  function renderReview() {
+    var st = reviewState();
+    if (!st) { rvSum.textContent = 'Движок не готов'; return; }
+    rvEval.textContent = st.evalText;
+    rvEval.style.color = st.evalWhite > 60 ? '#ffffff' : (st.evalWhite < -60 ? '#b5b1ac' : TEXT);
+    rvBarFill.style.width = Math.round(st.share * 100) + '%';
+    var sig = st.total + '|' + st.evalText + '|' +
+      (st.moves.length ? st.moves[st.moves.length - 1].label : '');
+    if (sig === rvSig) return;
+    rvSig = sig;
+    rvList.textContent = '';
+    if (!st.moves.length) {
+      el('div', 'color:rgba(255,255,255,.5);font-size:10.5px;', rvList, 'Ходов пока нет');
+    }
+    st.moves.forEach(function (m) {
+      var row = el('div',
+        'display:flex;align-items:center;gap:6px;padding:3px 4px;border-radius:7px;' +
+        (m.mine ? 'background:rgba(255,255,255,.05);' : ''), rvList);
+      el('span',
+        'flex:none;width:30px;color:rgba(255,255,255,.45);font:500 10px/1.2 Inter,sans-serif;',
+        row, Math.ceil(m.n / 2) + (m.color === 'w' ? '.' : '...'));
+      el('span',
+        'flex:none;width:56px;color:' + TEXT + ';font:600 11px/1.2 Inter,sans-serif;', row, m.san);
+      var lab = el('span',
+        'flex:none;font:600 10px/1.2 Inter,sans-serif;', row, m.label === null ? '\u2014' : m.label);
+      lab.style.color = m.label === null ? 'rgba(255,255,255,.4)' : (RV_COLORS[m.label] || TEXT);
+      if (m.label !== null && m.loss > 0) {
+        el('span', 'flex:none;color:rgba(255,255,255,.4);font:500 10px/1.2 Inter,sans-serif;',
+          row, (m.approx ? '\u2248' : '') + '-' + (m.loss / 100).toFixed(2));
+      }
+      if (m.best) {
+        el('span',
+          'flex:none;margin-left:auto;color:rgba(255,255,255,.35);font:500 9.5px/1.2 Inter,sans-serif;',
+          row, 'лучше ' + m.best);
+      }
+    });
+    var sv = rvList.querySelector('div:last-child');
+    if (sv && sv.scrollIntoView) { try { sv.scrollIntoView({ block: 'end' }); } catch (er) {} }
+    rvSum.textContent = 'Белые: ' + fmtRvSum(st.sumW) + '\nЧёрные: ' + fmtRvSum(st.sumB);
+  }
+
+  // Плавающий бейдж с оценкой последнего хода.
+  var rvBadge = el('div',
+    'position:fixed;left:50%;bottom:27%;transform:translate(-50%,10px);z-index:2147483645;' +
+    'display:none;align-items:center;gap:6px;padding:6px 13px;border-radius:999px;' +
+    'background:rgba(18,20,26,.85);color:' + TEXT + ';' +
+    '-webkit-backdrop-filter:blur(12px) saturate(140%);backdrop-filter:blur(12px) saturate(140%);' +
+    'box-shadow:0 12px 30px rgba(0,0,0,.35);opacity:0;pointer-events:none;' +
+    'font:600 12px/1 Inter,"Segoe UI",system-ui,sans-serif;white-space:nowrap;' +
+    'transition:opacity 220ms ease,transform 260ms ' + EASE + ';', null, '');
+  document.documentElement.appendChild(rvBadge);
+  var rvBadgeTimer = 0;
+  var rvBadgeN = -1;
+  function hideReviewBadge() {
+    rvBadge.style.opacity = '0';
+    rvBadge.style.transform = 'translate(-50%,10px)';
+    if (rvBadgeTimer) { clearTimeout(rvBadgeTimer); rvBadgeTimer = 0; }
+    setTimeout(function () {
+      if (rvBadge.style.opacity === '0') rvBadge.style.display = 'none';
+    }, 260);
+  }
+  function updateReviewBadge() {
+    if (!cfg.review) return;
+    var st = reviewState();
+    if (!st || !st.moves.length) return;
+    var m = st.moves[st.moves.length - 1];
+    if (m.n === rvBadgeN || m.label === null) return;
+    rvBadgeN = m.n;
+    rvBadge.textContent = (m.color === 'w' ? 'Белые: ' : 'Чёрные: ') + m.san + ' \u2014 ' + m.label;
+    rvBadge.style.color = RV_COLORS[m.label] || TEXT;
+    rvBadge.style.display = 'flex';
+    requestAnimationFrame(function () {
+      rvBadge.style.opacity = '1';
+      rvBadge.style.transform = 'translate(-50%,0)';
+    });
+    if (rvBadgeTimer) clearTimeout(rvBadgeTimer);
+    rvBadgeTimer = setTimeout(hideReviewBadge, 3200);
+  }
+
+  // ---------- advantage (шкала перевеса) ----------
+  var advantage = makeRow('advantage', 'Перевес', false);
+  advantage.button.addEventListener('click', function () {
+    cfg.advantage = !cfg.advantage;
+    paintRow('advantage', cfg.advantage);
+    queue();
+    jelly(advantage.button);
+    updateAdvantage();
+  });
+
+  var advBar = el('div',
+    'position:fixed;left:6px;top:50%;transform:translateY(-50%);width:9px;height:42vh;' +
+    'z-index:2147483646;border-radius:999px;background:#33312e;' +
+    'box-shadow:0 0 0 1px rgba(255,255,255,.28);pointer-events:none;display:none;', null);
+  var advFill = el('div',
+    'position:absolute;left:0;right:0;bottom:0;height:50%;border-radius:999px;background:#f2f1ed;' +
+    'transition:height 400ms ease;', advBar);
+  var advText = el('div',
+    'position:fixed;left:-4px;top:calc(50% + 22vh);width:30px;z-index:2147483646;' +
+    'pointer-events:none;display:none;text-align:center;color:' + TEXT + ';' +
+    'font:700 9.5px/1.2 Inter,"Segoe UI",system-ui,sans-serif;letter-spacing:.02em;' +
+    'text-shadow:0 1px 3px rgba(0,0,0,.85);', null, '+0.0');
+  document.documentElement.appendChild(advBar);
+  document.documentElement.appendChild(advText);
+  function updateAdvantage() {
+    var on = cfg.advantage;
+    advBar.style.display = on ? 'block' : 'none';
+    advText.style.display = on ? 'block' : 'none';
+    if (!on) return;
+    var st = reviewState();
+    if (!st) return;
+    advFill.style.height = Math.round(st.share * 100) + '%';
+    advText.textContent = st.evalText;
+    advText.style.color = st.evalWhite >= 0 ? '#f2f1ed' : '#a9a5a0';
+  }
+
   // ---------- color popup ----------
   var pop = el('div',
     'position:absolute;left:146px;right:10px;bottom:12px;z-index:20;padding:10px;' + plateCss(10) +
@@ -686,6 +848,8 @@
       '&focusPause=' + (cfg.focusPause ? 1 : 0) +
       '&weakMoves=' + (cfg.weakMoves ? 1 : 0) +
       '&proctorGuard=' + (cfg.proctorGuard ? 1 : 0) +
+      '&review=' + (cfg.review ? 1 : 0) +
+      '&advantage=' + (cfg.advantage ? 1 : 0) +
       '&style=' + cfg.style +
       '&fromColor=' + encodeURIComponent(cfg.fromColor) +
       '&toColor=' + encodeURIComponent(cfg.toColor) +
@@ -754,6 +918,9 @@
     } else {
       hideToast();
     }
+    if (cfg.advantage) updateAdvantage();
+    if (cfg.review) updateReviewBadge();
+    if (openMenu === 'review') renderReview();
   }, 240);
 
   // ---------- open / close / apply ----------
@@ -806,6 +973,8 @@
     if (typeof c.focusPause === 'boolean') cfg.focusPause = c.focusPause;
     if (typeof c.weakMoves === 'boolean') cfg.weakMoves = c.weakMoves;
     if (typeof c.proctorGuard === 'boolean') cfg.proctorGuard = c.proctorGuard;
+    if (typeof c.review === 'boolean') cfg.review = c.review;
+    if (typeof c.advantage === 'boolean') cfg.advantage = c.advantage;
     if (typeof c.arrows === 'boolean') cfg.arrows = c.arrows;
     if (c.style === 'arrows' || c.style === 'squares') {
       cfg.style = c.style;
@@ -816,9 +985,13 @@
     if (c.arrowColor) cfg.arrowColor = c.arrowColor;
     paintRow('multi', cfg.multi);
     paintRow('auto', cfg.auto);
+    paintRow('review', cfg.review);
+    paintRow('advantage', cfg.advantage);
     paintAccuracy();
     renderSeg();
     renderColors();
+    updateAdvantage();
+    if (!cfg.review) hideReviewBadge();
   }
 
   closeBtn.addEventListener('click', function (e) {
@@ -836,6 +1009,7 @@
           accuracy: cfg.accuracy, accuracyOn: cfg.accuracyOn, rating: cfg.rating,
           multi: cfg.multi, auto: cfg.auto, timing: cfg.timing, focusPause: cfg.focusPause,
           weakMoves: cfg.weakMoves, proctorGuard: cfg.proctorGuard,
+          review: cfg.review, advantage: cfg.advantage,
           style: cfg.style, fromColor: cfg.fromColor, toColor: cfg.toColor, arrowColor: cfg.arrowColor
         },
         openMenu: openMenu, openColor: openColor,
