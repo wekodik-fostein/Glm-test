@@ -387,6 +387,10 @@ public class MainActivity extends Activity {
             if (review != null) cfg.review = "1".equals(review);
             String advantage = u.getQueryParameter("advantage");
             if (advantage != null) cfg.advantage = "1".equals(advantage);
+            String pure = u.getQueryParameter("pure");
+            if (pure != null) cfg.pure = "1".equals(pure);
+            String openings = u.getQueryParameter("openings");
+            if (openings != null) cfg.openings = "1".equals(openings);
             parseColor(u.getQueryParameter("fromColor"), 0);
             parseColor(u.getQueryParameter("toColor"), 1);
             parseColor(u.getQueryParameter("arrowColor"), 2);
