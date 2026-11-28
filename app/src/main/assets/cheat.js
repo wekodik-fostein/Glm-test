@@ -253,7 +253,8 @@
         if (!pv) return;
         var n = mp ? parseInt(mp[1], 10) : 1;
         if (n < 1 || n > 6) return;
-        CF.candidates[n - 1] = { mv: pv[1], cp: cp, mate: sc[1] === 'mate' };
+        CF.candidates[n - 1] = { mv: pv[1], cp: cp, mate: sc[1] === 'mate',
+                mateN: sc[1] === 'mate' ? Math.abs(raw) : 0 };
         if (n === 1) {
             CF.lastEval = cp;
             CF.lastMate = sc[1] === 'mate';
@@ -633,6 +634,7 @@
         if (line.indexOf('bestmove ') !== 0) return;
         var mv = line.split(/\s+/)[1];
         CF.busy = false;
+        RV.onAnalysisDone();
         if (CF.reanalyze) {
             CF.reanalyze = false;
             CF.pendingFen = '';
@@ -1015,6 +1017,203 @@
             weakTotal: CF.blunderQuota || 0,
             awaySec: Math.round((CF.awayMs || 0) / 1000),
             awayCount: CF.awayCount || 0
+        };
+    };
+
+    // ---------- game review (в духе chess.com) ----------
+    // Пассивный разбор: классификация каждого сыгранного хода + текущий перевес.
+    // Пороги и формула шкалы портированы из chess-analyzer.js. Движок не получает
+    // ни одного лишнего вызова: используются те же MultiPV-кандидаты, что и для
+    // подсказок, поэтому логика хинтов/таймингов не меняется.
+    var RV = {
+        hist: [],        // { n, color, uci, san, label, loss, cp, mate, best, mine }
+        ply: 0,
+        pending: null,   // ход соперника: ждёт оценки из анализа новой позиции
+        lastOurCp: null, // cp нашего последнего хода (наша перспектива)
+        evalWhite: 0,    // перевес в сантипешках от лица белых
+        evalMate: 0      // 0 = нет; +N = мат белыми за N, -N = мат чёрными за N
+    };
+    RV.LBL = {
+        best: 'Лучший',
+        excellent: 'Отличный',
+        good: 'Хороший',
+        inaccuracy: 'Неточность',
+        mistake: 'Ошибка',
+        blunder: 'Зевок'
+    };
+    RV.classify = function (loss) {
+        if (loss <= 10) return RV.LBL.best;
+        if (loss <= 25) return RV.LBL.excellent;
+        if (loss <= 50) return RV.LBL.good;
+        if (loss <= 100) return RV.LBL.inaccuracy;
+        if (loss <= 200) return RV.LBL.mistake;
+        return RV.LBL.blunder;
+    };
+    RV.fmtEval = function (cp, mate) {
+        if (mate) return (mate > 0 ? 'M' : '-M') + Math.abs(mate);
+        return (cp >= 0 ? '+' : '') + (cp / 100).toFixed(2);
+    };
+    RV.share = function (cp, mate) {   // доля белых на шкале 0..1
+        if (mate) return cp > 0 ? 1 : 0;
+        return 1 / (1 + Math.pow(10, -cp / 400));
+    };
+    RV.reset = function () {
+        RV.hist = [];
+        RV.ply = 0;
+        RV.pending = null;
+        RV.lastOurCp = null;
+        RV.evalWhite = 0;
+        RV.evalMate = 0;
+    };
+
+    // Компактная запись хода для списка (без уточнений неоднозначности).
+    RV.sanOf = function (mv, oldB) {
+        var from = sqIndex(mv.slice(0, 2)), to = sqIndex(mv.slice(2, 4));
+        var pc = oldB ? oldB[from] : null;
+        if (!pc) return mv;
+        var promo = mv.length > 4 ? mv.charAt(4) : '';
+        var cap = !!oldB[to] || (pc.p === 'p' && CF.ep === mv.slice(2, 4) && !oldB[to]);
+        if (pc.p === 'k' && Math.abs(colOf(to) - colOf(from)) === 2) {
+            return colOf(to) === 6 ? 'O-O' : 'O-O-O';
+        }
+        var s = '';
+        if (pc.p === 'p') {
+            if (cap) s += mv.charAt(0) + 'x';
+        } else {
+            s += pc.p.toUpperCase();
+            if (cap) s += 'x';
+        }
+        s += mv.slice(2, 4);
+        if (promo) s += '=' + promo.toUpperCase();
+        return s;
+    };
+
+    // Вызывается из scan() при обнаружении хода. Кандидаты CF.candidates в этот
+    // момент ещё принадлежат позиции ДО хода — именно они и нужны.
+    RV.onMove = function (mover, mv) {
+        if (!mover || !mv || mv.length < 4) return;
+        var fresh = !!(CF.pendingFen && CF.pendingFen === currentFen());
+        var list = [];
+        if (fresh) {
+            list = (CF.candidates || []).filter(function (x) { return !!x; });
+            list.sort(function (a, b) { return b.cp - a.cp; });
+        }
+        var best = list[0] || null, played = null, i;
+        for (i = 0; i < list.length; i++) {
+            if (list[i].mv === mv) { played = list[i]; break; }
+        }
+        if (!played) {   // движок даёт промо с буквой (e7e8q), DOM-дифф — без неё
+            for (i = 0; i < list.length; i++) {
+                if (list[i].mv.slice(0, 4) === mv.slice(0, 4)) { played = list[i]; break; }
+            }
+        }
+        var uci = played ? played.mv : mv;
+        var e = {
+            n: RV.ply + 1,
+            color: mover,
+            uci: uci,
+            san: RV.sanOf(uci, CF.board),
+            label: null,
+            loss: 0,
+            cp: null,
+            mate: 0,
+            best: null,
+            mine: mover === CF.myColor
+        };
+        if (mover === CF.myColor) {
+            if (played && best) {
+                e.cp = played.cp;
+                e.mate = played.mate ? Math.max(1, played.mateN || 1) : 0;
+                e.loss = Math.max(0, best.cp - played.cp);
+                e.label = RV.classify(e.loss);
+                e.best = played.mv === best.mv ? null : best.mv;
+                RV.lastOurCp = played.cp;
+                RV.evalWhite = mover === 'w' ? played.cp : -played.cp;
+                RV.evalMate = played.mate ? (RV.evalWhite > 0 ? e.mate : -e.mate) : 0;
+            } else if (best && list.length) {
+                // Ход вне топа MultiPV: точная потеря движку неизвестна, но она
+                // не меньше разницы между лучшим и худшим из показанных ходов
+                // (ход не попал в топ — значит он не лучше худшего из них).
+                var worst = list[list.length - 1];
+                e.loss = Math.max(0, best.cp - worst.cp);
+                e.label = RV.classify(Math.max(e.loss, 55));
+                e.approx = true;
+                e.best = best.mv;
+                RV.lastOurCp = worst.cp;
+                RV.evalWhite = mover === 'w' ? worst.cp : -worst.cp;
+                RV.evalMate = 0;
+            } else {
+                RV.lastOurCp = null;   // быстрый ход: анализ позиции не успел завершиться
+            }
+        } else {
+            // Ход соперника: потеря станет известна после анализа позиции,
+            // которая возникла после него (наш ход по очереди).
+            RV.pending = e;
+        }
+        RV.hist.push(e);
+        RV.ply++;
+        if (RV.hist.length > 400) RV.hist.shift();
+    };
+
+    // Вызывается из onEngineLine, когда поиск завершился (bestmove). Кандидаты
+    // соответствуют CF.pendingFen — позиции, где сейчас наш ход.
+    RV.onAnalysisDone = function () {
+        var list = (CF.candidates || []).filter(function (x) { return !!x; });
+        if (!list.length) return;
+        list.sort(function (a, b) { return b.cp - a.cp; });
+        var best = list[0];
+        var side = (CF.pendingFen || '').split(' ')[1];
+        RV.evalWhite = side === 'w' ? best.cp : -best.cp;
+        RV.evalMate = best.mate ? (RV.evalWhite > 0 ? 1 : -1) * Math.max(1, best.mateN || 1) : 0;
+        if (RV.pending && RV.lastOurCp !== null) {
+            // Наш cp после нашего хода -> наш лучший cp после ответа соперника:
+            // разница и есть потеря соперника (в его перспективе).
+            var loss = Math.max(0, best.cp - RV.lastOurCp);
+            RV.pending.loss = loss;
+            RV.pending.label = RV.classify(loss);
+            RV.pending.cp = -best.cp;
+            RV.pending.mate = best.mate ? -Math.max(1, best.mateN || 1) : 0;
+        }
+        RV.pending = null;
+    };
+
+    CF.getReviewState = function () {
+        var i, e, s;
+        var sum = {
+            w: { n: 0, loss: 0, blunder: 0, mistake: 0, inaccuracy: 0 },
+            b: { n: 0, loss: 0, blunder: 0, mistake: 0, inaccuracy: 0 }
+        };
+        for (i = 0; i < RV.hist.length; i++) {
+            e = RV.hist[i];
+            s = sum[e.color];
+            if (!s) continue;
+            s.n++;
+            if (e.label !== null) s.loss += e.loss;
+            if (e.label === RV.LBL.blunder) s.blunder++;
+            else if (e.label === RV.LBL.mistake) s.mistake++;
+            else if (e.label === RV.LBL.inaccuracy) s.inaccuracy++;
+        }
+        var moves = [];
+        var start = Math.max(0, RV.hist.length - 30);
+        for (i = start; i < RV.hist.length; i++) {
+            e = RV.hist[i];
+            moves.push({
+                n: e.n, color: e.color, san: e.san, label: e.label,
+                loss: Math.round(e.loss), best: e.best, mine: e.mine,
+                approx: !!e.approx,
+                evalWhite: (e.color === 'w' ? 1 : -1) * (e.cp || 0)
+            });
+        }
+        return {
+            moves: moves,
+            total: RV.ply,
+            evalWhite: Math.round(RV.evalWhite),
+            evalMate: RV.evalMate,
+            evalText: RV.fmtEval(Math.round(RV.evalWhite), RV.evalMate),
+            share: RV.share(RV.evalWhite, RV.evalMate),
+            sumW: sum.w,
+            sumB: sum.b,
+            myColor: CF.myColor
         };
     };
 
@@ -1675,6 +1874,7 @@
         // automatically locked team, but keep an explicit manual override.
         if (!CF.board) {
             CF.candidates = [];
+            RV.reset();
             CF.display = [];
             CF.chosen = null;
             CF.pendingFen = '';
@@ -1752,6 +1952,7 @@
         // a running toggle or chess.com's DOM classes, both of which drift.
         var mover = moverColor(CF.board, nb);
         var mv = diffMove(CF.board, nb);
+        if (mv && mover) RV.onMove(mover, mv);
         if (mover) CF.side = (mover === 'w') ? 'b' : 'w';
         if (mv) {
             applyMove(mv, CF.board, nb);
