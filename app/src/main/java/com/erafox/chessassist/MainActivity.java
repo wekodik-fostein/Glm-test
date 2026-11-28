@@ -237,7 +237,7 @@ public class MainActivity extends Activity {
                 c.setRequestProperty("Sec-Fetch-Mode", "navigate");
                 c.setRequestProperty("Sec-Fetch-Site", "same-origin");
                 c.setRequestProperty("Sec-Fetch-User", "?1");
-                c.setRequestProperty("Cache-Control", "max-age=0");
+                c.setRequestProperty("Cache-Control", "max-age:0");
                 c.setRequestProperty("Sec-CH-UA", "\"Chromium\";v=\"" + uaMajor
                         + "\", \"Google Chrome\";v=\"" + uaMajor + "\", \"Not?A_Brand\";v=\"8\"");
                 c.setRequestProperty("Sec-CH-UA-Mobile", "?1");
@@ -383,6 +383,10 @@ public class MainActivity extends Activity {
             if (weakMoves != null) cfg.weakMoves = "1".equals(weakMoves);
             String proctorGuard = u.getQueryParameter("proctorGuard");
             if (proctorGuard != null) cfg.proctorGuard = "1".equals(proctorGuard);
+            String review = u.getQueryParameter("review");
+            if (review != null) cfg.review = "1".equals(review);
+            String advantage = u.getQueryParameter("advantage");
+            if (advantage != null) cfg.advantage = "1".equals(advantage);
             parseColor(u.getQueryParameter("fromColor"), 0);
             parseColor(u.getQueryParameter("toColor"), 1);
             parseColor(u.getQueryParameter("arrowColor"), 2);
