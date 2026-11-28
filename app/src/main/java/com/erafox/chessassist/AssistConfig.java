@@ -1,4 +1,3 @@
-// Java / AssistConfig.java / Android 7+ / settings model stored in SharedPreferences.
 package com.erafox.chessassist;
 
 import android.content.Context;
@@ -20,6 +19,8 @@ public class AssistConfig {
     public boolean proctorGuard = true;
     public boolean review = false;
     public boolean advantage = false;
+    public boolean pure = false;
+    public boolean openings = false;
     public int fromColor = 0xFF14B8A6;
     public int toColor = 0xFF14B8A6;
     public int arrowColor = 0xFF14B8A6;
@@ -52,6 +53,8 @@ public class AssistConfig {
         a.proctorGuard = p.getBoolean("proctorGuard", a.proctorGuard);
         a.review = p.getBoolean("review", a.review);
         a.advantage = p.getBoolean("advantage", a.advantage);
+        a.pure = p.getBoolean("pure", a.pure);
+        a.openings = p.getBoolean("openings", a.openings);
         a.fromColor = p.getInt("fromColor", a.fromColor);
         a.toColor = p.getInt("toColor", a.toColor);
         a.arrowColor = p.getInt("arrowColor", a.arrowColor);
@@ -72,6 +75,8 @@ public class AssistConfig {
                 .putBoolean("proctorGuard", proctorGuard)
                 .putBoolean("review", review)
                 .putBoolean("advantage", advantage)
+                .putBoolean("pure", pure)
+                .putBoolean("openings", openings)
                 .putInt("fromColor", fromColor)
                 .putInt("toColor", toColor)
                 .putInt("arrowColor", arrowColor)
@@ -92,6 +97,8 @@ public class AssistConfig {
         proctorGuard = true;
         review = false;
         advantage = false;
+        pure = false;
+        openings = false;
         fromColor = 0xFF14B8A6;
         toColor = 0xFF14B8A6;
         arrowColor = 0xFF14B8A6;
@@ -111,6 +118,8 @@ public class AssistConfig {
             o.put("proctorGuard", proctorGuard);
             o.put("review", review);
             o.put("advantage", advantage);
+            o.put("pure", pure);
+            o.put("openings", openings);
             o.put("style", arrows ? "arrows" : "squares");
             o.put("fromColor", hex(fromColor));
             o.put("toColor", hex(toColor));
