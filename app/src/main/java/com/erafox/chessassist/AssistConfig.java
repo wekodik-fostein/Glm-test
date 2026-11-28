@@ -18,6 +18,8 @@ public class AssistConfig {
     public boolean focusPause = true;
     public boolean weakMoves = false;
     public boolean proctorGuard = true;
+    public boolean review = false;
+    public boolean advantage = false;
     public int fromColor = 0xFF14B8A6;
     public int toColor = 0xFF14B8A6;
     public int arrowColor = 0xFF14B8A6;
@@ -48,6 +50,8 @@ public class AssistConfig {
             a.auto = false;
         }
         a.proctorGuard = p.getBoolean("proctorGuard", a.proctorGuard);
+        a.review = p.getBoolean("review", a.review);
+        a.advantage = p.getBoolean("advantage", a.advantage);
         a.fromColor = p.getInt("fromColor", a.fromColor);
         a.toColor = p.getInt("toColor", a.toColor);
         a.arrowColor = p.getInt("arrowColor", a.arrowColor);
@@ -66,6 +70,8 @@ public class AssistConfig {
                 .putBoolean("focusPause", focusPause)
                 .putBoolean("weakMoves", weakMoves)
                 .putBoolean("proctorGuard", proctorGuard)
+                .putBoolean("review", review)
+                .putBoolean("advantage", advantage)
                 .putInt("fromColor", fromColor)
                 .putInt("toColor", toColor)
                 .putInt("arrowColor", arrowColor)
@@ -84,6 +90,8 @@ public class AssistConfig {
         focusPause = true;
         weakMoves = false;
         proctorGuard = true;
+        review = false;
+        advantage = false;
         fromColor = 0xFF14B8A6;
         toColor = 0xFF14B8A6;
         arrowColor = 0xFF14B8A6;
@@ -101,6 +109,8 @@ public class AssistConfig {
             o.put("focusPause", focusPause);
             o.put("weakMoves", weakMoves);
             o.put("proctorGuard", proctorGuard);
+            o.put("review", review);
+            o.put("advantage", advantage);
             o.put("style", arrows ? "arrows" : "squares");
             o.put("fromColor", hex(fromColor));
             o.put("toColor", hex(toColor));
